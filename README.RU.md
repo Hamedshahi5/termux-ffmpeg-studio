@@ -28,7 +28,7 @@ Termux FFmpeg Studio 🎬
 🚀 Использование
 1. Клонировать репозиторий:
    `bash
-   git clone https://github.com/hamed/termux-ffmpeg-studio.git
+   git clone https://github.com/Hamedshahi5/termux-ffmpeg-studio.git
    cd termux-ffmpeg-studio
    `
 2. Запустить скрипт:
