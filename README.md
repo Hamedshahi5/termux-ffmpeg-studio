@@ -28,7 +28,7 @@ Built with Python 3.12+, Rich, and Questionary for the best UX.
 🚀 Usage
 1. Clone the repo:
    `bash
-   git clone https://github.com/hamed/termux-ffmpeg-studio.git
+   git clone https://github.com/Hamedshahi5/termux-ffmpeg-studio.git
    cd termux-ffmpeg-studio
    `
 2. Run the script:
