@@ -1,3 +1,4 @@
+
 Termux FFmpeg Studio 🎬
 
 An interactive, modern CLI tool for Termux that makes working with FFmpeg and subtitles easy and beautiful.  
@@ -54,3 +55,32 @@ It tells Git which files/folders to ignore so they don’t get uploaded to GitHu
 
 📜 License
 MIT License — free to use, modify, and share.
+
+
+
+
+
+# 💖 Support & Donations
+
+---
+
+## 🇮🇷 فارسی
+این پروژه با عشق ساخته شده. اگر دوست داشتی از ادامه‌ی توسعه‌اش حمایت کنی، می‌تونی کمک کوچیکی انجام بدی. هر دونیت مثل یک انرژی تازه برای ادامه‌ی کاره 🌱
+
+---
+
+## 🇬🇧 English
+This project is built with passion. If you’d like to support its growth, consider making a small donation. Every contribution is like fresh energy to keep it alive 🚀
+
+---
+
+## 🇷🇺 Русский
+Этот проект создан с любовью. Если вы хотите поддержать его развитие, сделайте небольшое пожертвование. Каждое пожертвование — это новая энергия для движения вперёд ✨
+
+---
+
+## 💳 Wallet Addresses
+```text
+Bitcoin (BTC): bc1qmn0vp2mt5722k6p6p3yjdfvjmrm6p793nknshg
+Ethereum (ETH): 0x2b1e6d213a27d376df9c46756f8dc9f831bdbc90
+USDT (TRC20): TXPZfj9Ddxc7MLabWFxEmphEFD3WdCCqpz
