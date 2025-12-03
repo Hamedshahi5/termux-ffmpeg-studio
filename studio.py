@@ -1,8 +1,8 @@
-# ===== TERMUX FFMPEG STUDIO (v6.4 FINAL STABLE) =====
-# Fixes: 
-# 1. Fixed "Hanging" issue by merging stderr/stdout
-# 2. Fixed Rich Markup tags error
-# 3. Preserved "Size Fix" and all features
+# ===== TERMUX FFMPEG STUDIO (v6.5 GITHUB FIXED) =====
+# Fixes:
+# 1. Softsub Logic (Now properly muxes into MP4 using mov_text)
+# 2. Audio Codec (Re-encodes to AAC for MP4 compatibility)
+# 3. Rich Panic (Escapes filenames containing square brackets)
 
 import os
 import re
@@ -13,7 +13,7 @@ import asyncio
 import textwrap
 import subprocess
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple
 from dataclasses import dataclass
 
 # ===== DEPENDENCY CHECKER =====
@@ -38,6 +38,7 @@ try:
     from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
     from rich.theme import Theme
     from rich.align import Align
+    from rich.markup import escape  # <--- FIX 3: IMPORT ESCAPE
     import questionary
     from questionary import Style
     from fontTools.ttLib import TTFont
@@ -68,7 +69,7 @@ LOGO_TEXT = """
  [bold magenta]╔╗ ╔╗╔╗  ╔═╗╔═╗╦ ╦[/]
  [bold cyan]╠╩╗╠╣║║  ║ ║║  ╠═╣[/]
  [bold magenta]╚═╝╝╚╚╚═╝╚═╝╚═╝╩ ╩[/]
- [dim]  Studio v6.4 (Final Stable)[/]
+ [dim]  Studio v6.5 (GitHub Fixes)[/]
 """
 
 Q_STYLE = Style([
@@ -105,15 +106,11 @@ class AssGenerator:
     
     @staticmethod
     def _hex_to_ass(hex_color: str) -> str:
-        """Converts HEX (#RRGGBB) to ASS format (&H00BBGGRR)."""
         h = hex_color.upper().replace('#', '').strip()
-        
-        # Preset handling
         if "YELLOW" in h: return "&H0000FFFF"
         if "WHITE" in h:  return "&H00FFFFFF"
         if "RED" in h:    return "&H000000FF"
-        
-        if len(h) != 6: return "&H0000FFFF" # Default Yellow if invalid
+        if len(h) != 6: return "&H0000FFFF"
         r, g, b = h[0:2], h[2:4], h[4:6]
         return f"&H00{b}{g}{r}"
 
@@ -131,7 +128,6 @@ class AssGenerator:
     def create(cls, srt_path: Path, config: JobConfig) -> Path:
         ass_path = DIRECTORIES["OUTPUT"] / f"temp_{int(time.time())}.ass"
         
-        # Style Logic
         font_name = cls._get_font_name(config.font_path)
         primary_color = cls._hex_to_ass(config.color_hex)
         
@@ -144,7 +140,6 @@ class AssGenerator:
             outline, back = "&H00000000", "&H00000000"
             shadow = "1"
 
-        # ASS Header Template
         header = textwrap.dedent(f"""
             [Script Info]
             ScriptType: v4.00+
@@ -159,7 +154,6 @@ class AssGenerator:
             Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         """).strip() + "\n"
 
-        # Regex for SRT Parsing
         regex = re.compile(r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n((?:.+\n?)+)')
         
         try:
@@ -190,7 +184,6 @@ class MediaProcessor:
         self.cleanup_files = []
 
     def _escape_path(self, path: Path) -> str:
-        """Escapes paths for FFmpeg filter complex."""
         return str(path).replace('\\', '/').replace(':', '\\:').replace("'", "'\\''")
 
     async def _extract_internal_sub(self) -> Optional[Path]:
@@ -200,7 +193,6 @@ class MediaProcessor:
             "-map", f"0:{self.cfg.internal_sub_index}", 
             str(temp_srt)
         ]
-        # FIX: Merged stderr to prevent hanging
         p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         await p.wait()
         
@@ -218,17 +210,15 @@ class MediaProcessor:
         except: return 0.0
 
     async def run(self):
-        # 1. Prepare Subtitles
+        # 1. Prepare Subtitles (Only for Hardsub modes)
         ass_file = None
         if "hardsub" in self.cfg.mode:
-            with console.status("[bold magenta]Preparing Subtitles...[/]", spinner="dots"):
+            with console.status("[bold magenta]Preparing Hardsub...[/]", spinner="dots"):
                 srt_source = self.cfg.subtitle_path
                 
                 if self.cfg.mode == 'hardsub_internal':
                     srt_source = await self._extract_internal_sub()
-                    if not srt_source:
-                        console.print("[error]Failed to extract internal subtitles.[/]")
-                        return
+                    if not srt_source: return
 
                 if srt_source:
                     try:
@@ -239,6 +229,24 @@ class MediaProcessor:
         # 2. Build FFmpeg Command
         cmd = ["ffmpeg", "-y", "-i", str(self.cfg.video_path)]
         
+        # Keep track of input indices
+        # Index 0: Video
+        watermark_index = -1
+        softsub_index = -1
+        current_input_idx = 1
+
+        # Add Watermark Input if needed
+        if self.cfg.watermark_path:
+            cmd.extend(["-i", str(self.cfg.watermark_path)])
+            watermark_index = current_input_idx
+            current_input_idx += 1
+        
+        # Add Softsub Input if needed (<-- FIX 1: Softsub Logic)
+        if self.cfg.mode == "softsub" and self.cfg.subtitle_path:
+            cmd.extend(["-i", str(self.cfg.subtitle_path)])
+            softsub_index = current_input_idx
+            current_input_idx += 1
+
         if self.cfg.is_preview:
             cmd.extend(["-ss", "00:00:30", "-t", "15"])
 
@@ -246,32 +254,27 @@ class MediaProcessor:
         filters = []
         last_vid = "[0:v]"
         
-        # A. Subtitles
+        # A. Hardsub Burning
         if ass_file:
             fonts_dir = self.cfg.font_path.parent if self.cfg.font_path else DIRECTORIES["FONTS"]
             filters.append(f"{last_vid}subtitles='{self._escape_path(ass_file)}':fontsdir='{self._escape_path(fonts_dir)}'[v_sub]")
             last_vid = "[v_sub]"
         
-        # B. Scale
+        # B. Scaling
         if self.cfg.resolution != "Original":
             h = "720" if self.cfg.resolution == "720p" else "480"
             filters.append(f"{last_vid}scale=-2:{h}[v_scale]")
             last_vid = "[v_scale]"
         
-        # C. Watermark
-        if self.cfg.watermark_path:
-            cmd.extend(["-i", str(self.cfg.watermark_path)])
-            wm_idx = 1 # Since video is 0
-            
+        # C. Watermark Overlay
+        if watermark_index != -1:
             pos_map = {
-                "Top-Left": "20:20", 
-                "Top-Right": "main_w-overlay_w-20:20",
-                "Bottom-Left": "20:main_h-overlay_h-20", 
-                "Bottom-Right": "main_w-overlay_w-20:main_h-overlay_h-20",
+                "Top-Left": "20:20", "Top-Right": "main_w-overlay_w-20:20",
+                "Bottom-Left": "20:main_h-overlay_h-20", "Bottom-Right": "main_w-overlay_w-20:main_h-overlay_h-20",
                 "Center": "(main_w-overlay_w)/2:(main_h-overlay_h)/2"
             }
             xy = pos_map.get(self.cfg.watermark_pos, "20:20")
-            filters.append(f"{last_vid}[{wm_idx}:v]overlay={xy}[v_fin]")
+            filters.append(f"{last_vid}[{watermark_index}:v]overlay={xy}[v_fin]")
             last_vid = "[v_fin]"
 
         if filters:
@@ -279,9 +282,17 @@ class MediaProcessor:
         else:
             cmd.extend(["-map", "0:v"])
 
-        # Audio & Encoding Settings
-        cmd.extend(["-map", "0:a?", "-c:a", "copy"])
+        # Audio Settings (<-- FIX 2: Force AAC for MP4)
+        cmd.extend(["-map", "0:a?", "-c:a", "aac", "-b:a", "192k"])
+
+        # Softsub Mapping (<-- FIX 1 Continuation)
+        if softsub_index != -1:
+            cmd.extend(["-map", f"{softsub_index}:0", "-c:s", "mov_text"])
+
+        # Video Encoding
         cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-sn"])
+        # Note: -sn prevents copying internal subs from input video if we are doing softsub external
+        
         cmd.extend(["-progress", "pipe:1", str(self.output_file)])
 
         # 3. Execution
@@ -290,16 +301,12 @@ class MediaProcessor:
         
         total_duration = 15.0 if self.cfg.is_preview else await self.get_video_duration()
         
-        # FIX: Merging stderr into stdout so buffer doesn't fill up and hang
+        # Redirect stderr to stdout to prevent hanging
         process = await asyncio.create_subprocess_exec(
-            *cmd, 
-            stdout=asyncio.subprocess.PIPE, 
-            stderr=asyncio.subprocess.STDOUT
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
 
         error_logs = []
-
-        # Progress Bar
         with Progress(
             SpinnerColumn("dots", style="cyan"),
             TextColumn("[bold white]{task.description}"),
@@ -309,14 +316,10 @@ class MediaProcessor:
             console=console
         ) as progress:
             task_id = progress.add_task("Processing...", total=100)
-            
             while True:
                 line = await process.stdout.readline()
                 if not line: break
-                
                 line_str = line.decode('utf-8', 'ignore').strip()
-                
-                # Keep last 20 lines for error debugging
                 error_logs.append(line_str)
                 if len(error_logs) > 20: error_logs.pop(0)
 
@@ -329,8 +332,6 @@ class MediaProcessor:
                     except: pass
 
         await process.wait()
-
-        # Cleanup
         for f in self.cleanup_files:
             if f.exists(): os.remove(f)
 
@@ -344,7 +345,6 @@ class MediaProcessor:
 
 # ===== UTILS & UI =====
 async def get_streams(video_path: Path) -> List[Tuple[int, str]]:
-    """Returns list of subtitle streams: (index, label)."""
     cmd = ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language,title", "-of", "csv=p=0", str(video_path)]
     try:
         p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
@@ -360,141 +360,96 @@ async def get_streams(video_path: Path) -> List[Tuple[int, str]]:
     except: return []
 
 async def select_file(directory: Path, extensions: tuple, prompt: str) -> Optional[Path]:
-    """Generic file selector."""
     files = sorted([f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in extensions], key=lambda x: x.name)
     if not files: return None
-    
     choices = [f.name for f in files]
     if directory.name == "Fonts": choices.insert(0, "Default System Font")
-    
     sel = await questionary.select(f"{prompt}:", choices=choices, style=Q_STYLE).ask_async()
     if not sel or sel == "Default System Font": return None
     return directory / sel
 
 async def main():
-    # Setup
     os.system('cls' if os.name == 'nt' else 'clear')
-    for p in DIRECTORIES.values(): 
-        p.mkdir(parents=True, exist_ok=True)
-    
+    for p in DIRECTORIES.values(): p.mkdir(parents=True, exist_ok=True)
     console.print(Panel(Align.center(LOGO_TEXT), border_style="magenta", padding=(0, 2)))
 
     while True:
-        # --- 1. VIDEO SELECTION ---
+        # 1. Video
         video = await select_file(DIRECTORIES["INPUT"], ('.mp4', '.mkv', '.avi'), "Select Video")
         if not video: break
         
-        mode_label = await questionary.select(
-            "Operation Mode:", 
-            choices=["Hardsub (SRT)", "Softsub (Mux)", "Internal Hardsub"], 
-            style=Q_STYLE
-        ).ask_async()
-        
-        mode_map = {
-            "Hardsub (SRT)": "hardsub_srt",
-            "Softsub (Mux)": "softsub",
-            "Internal Hardsub": "hardsub_internal"
-        }
+        mode_label = await questionary.select("Operation Mode:", choices=["Hardsub (SRT)", "Softsub (Mux)", "Internal Hardsub"], style=Q_STYLE).ask_async()
+        mode_map = {"Hardsub (SRT)": "hardsub_srt", "Softsub (Mux)": "softsub", "Internal Hardsub": "hardsub_internal"}
         cfg = JobConfig(video_path=video, mode=mode_map[mode_label])
 
-        # --- 2. SUBTITLE SELECTION ---
+        # 2. Subtitles
         if cfg.mode in ["hardsub_srt", "softsub"]:
             sub = await select_file(DIRECTORIES["SUBTITLES"], ('.srt',), "Select SRT")
             if not sub: continue
             cfg.subtitle_path = sub
-            
         elif cfg.mode == "hardsub_internal":
             console.print("[dim]Analyzing streams...[/]")
             streams = await get_streams(video)
             if not streams:
-                console.print("[yellow]No subtitle streams found in video![/]")
-                time.sleep(2)
-                continue
-            
+                console.print("[yellow]No subtitle streams found![/]")
+                time.sleep(2); continue
             s_label = await questionary.select("Select Stream:", choices=[s[1] for s in streams], style=Q_STYLE).ask_async()
             cfg.internal_sub_index = next(s[0] for s in streams if s[1] == s_label)
 
-        # --- 3. STYLING (Hardsub Only) ---
+        # 3. Styling (Hardsub Only)
         if "hardsub" in cfg.mode:
-            # Font
             cfg.font_path = await select_file(DIRECTORIES["FONTS"], ('.ttf', '.otf'), "Font Family")
-            
-            # Color
             clr = await questionary.select("Font Color:", choices=["Yellow", "White", "Custom Hex"], style=Q_STYLE).ask_async()
             if clr == "Custom Hex":
-                cfg.color_hex = await questionary.text("Enter Hex (e.g. FF00FF):", default="FFFF00").ask_async()
+                cfg.color_hex = await questionary.text("Enter Hex:", default="FFFF00").ask_async()
             else:
                 cfg.color_hex = clr.upper()
-            
-            # Background
             cfg.use_opaque_box = await questionary.confirm("Add Background Box?", default=False, style=Q_STYLE).ask_async()
             
-            # Size (PRESERVED LOGIC)
             size_opts = ["30 (Standard)", "48 (Large)", "60 (Huge)", "Custom"]
             sz_sel = await questionary.select("Font Size:", choices=size_opts, default="48 (Large)", style=Q_STYLE).ask_async()
-            
             if sz_sel == "Custom":
-                raw_size = await questionary.text("Enter Size (10-200):", default="48").ask_async()
+                raw_size = await questionary.text("Enter Size:", default="48").ask_async()
                 cfg.font_size = int(raw_size) if raw_size.isdigit() else 48
             else:
                 cfg.font_size = int(sz_sel.split(' ')[0])
 
-        # --- 4. VIDEO SETTINGS ---
-        cfg.resolution = await questionary.select(
-            "Output Resolution:", 
-            choices=["Original", "720p", "480p"], 
-            default="Original", 
-            style=Q_STYLE
-        ).ask_async()
-
-        # Watermark
+        # 4. Settings
+        cfg.resolution = await questionary.select("Output Resolution:", choices=["Original", "720p", "480p"], default="Original", style=Q_STYLE).ask_async()
+        
         logos = list(DIRECTORIES["LOGOS"].glob("*"))
         valid_logos = [f for f in logos if f.suffix.lower() in ('.png', '.jpg')]
         if valid_logos:
             wm_choices = ["None"] + [f.name for f in valid_logos]
             wm_sel = await questionary.select("Add Watermark:", choices=wm_choices, style=Q_STYLE).ask_async()
-            
             if wm_sel != "None":
                 cfg.watermark_path = DIRECTORIES["LOGOS"] / wm_sel
-                cfg.watermark_pos = await questionary.select(
-                    "Watermark Position:", 
-                    choices=["Bottom-Right", "Top-Right", "Top-Left", "Bottom-Left", "Center"], 
-                    style=Q_STYLE
-                ).ask_async()
+                cfg.watermark_pos = await questionary.select("Position:", choices=["Bottom-Right", "Top-Right", "Top-Left", "Bottom-Left", "Center"], style=Q_STYLE).ask_async()
 
-        # --- 5. CONFIRMATION & EXECUTION ---
+        # 5. Execution
         while True:
-            # FIX: Correct closing tags for rich text
+            # <--- FIX 3: Safe print using escape()
             summary = (
-                f"\n[bold white]Target:[/][cyan] {cfg.video_path.name}[/]\n"
-                f"[bold white]Res:[/][cyan] {cfg.resolution}[/] | "
-                f"[bold white]Size:[/][cyan] {cfg.font_size}px[/]"
+                f"\n[bold white]Target:[/][cyan] {escape(cfg.video_path.name)}[/]\n"
+                f"[bold white]Mode:[/][green] {cfg.mode.upper()}[/] | "
+                f"[bold white]Res:[/][cyan] {cfg.resolution}[/]"
             )
-            
             console.print(Panel(summary, title="Job Summary", border_style="cyan"))
             
-            action = await questionary.select(
-                "Ready?", 
-                choices=["👁️  Preview (15s)", "🚀 Start Render", "🔙 Edit Settings"], 
-                style=Q_STYLE
-            ).ask_async()
+            action = await questionary.select("Ready?", choices=["👁️  Preview (15s)", "🚀 Start Render", "🔙 Edit Settings"], style=Q_STYLE).ask_async()
             
             if "Preview" in action:
                 cfg.is_preview = True
                 await MediaProcessor(cfg).run()
                 cfg.is_preview = False
                 input("\n[Press Enter to continue...]")
-                
             elif "Start Render" in action:
                 await MediaProcessor(cfg).run()
                 break
-                
             elif "Edit Settings" in action:
                 break 
         
-        # Loop Exit
         if not await questionary.confirm("Process another video?", default=False, style=Q_STYLE).ask_async():
-            console.print("[yellow]Goodbye![/]")
             break
 
 if __name__ == "__main__":
